@@ -1,0 +1,89 @@
+name: Build
+on: 
+  workflow_dispatch: 
+  schedule:
+    - cron: "00 22 * * 1"
+  push:
+    paths:
+      - ".github/workflows/build.yml"
+
+jobs: 
+  linux-x64-build: 
+    runs-on: ubuntu-latest
+    steps: 
+      - name: Install dependencies
+        shell: bash
+        run: |
+          sudo apt update &&
+          sudo apt upgrade -y &&
+
+          sudo apt install cmake libfmt-dev libssl-dev rapidjson-dev -y
+
+      - name: Clone source
+        shell: bash
+        run: |
+          git clone -b linux --single-branch https://notabug.org/doublesine/navicat-keygen.git
+
+      - name: Build project
+        shell: bash
+        run: |
+          cd navicat-keygen
+
+          mkdir build
+          cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          cmake --build . -- -j4
+
+          mkdir bin
+          mv navicat-keygen navicat-patcher bin     
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: linux-x64-build
+          path: ${{ GITHUB.WORKSPACE }}/navicat-keygen/build/bin/*
+          retention-days: 7
+
+  windows-x64-build: 
+    runs-on: windows-latest
+    steps:
+      - name: Add MSBuild to PATH
+        uses: Dana-Prajea/Setup-MSBuild@v1.1
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          cd $VCPKG_INSTALLATION_ROOT
+
+          git reset --hard 3b3bd424827a1f7f4813216f6b32b6c61e386b2e
+          vcpkg install openssl:x64-windows-static
+
+          git reset --hard f65d6947c7212618c00dcc99ecd53c47db97f8cd
+          vcpkg install unicorn:x64-windows-static
+
+          git pull
+          vcpkg install fmt:x64-windows-static
+          vcpkg install rapidjson:x64-windows-static
+          vcpkg install keystone:x64-windows-static
+          
+          cd -
+
+      - name: Clone source
+        shell: bash
+        run: |
+          git clone -b windows --single-branch https://notabug.org/doublesine/navicat-keygen.git
+
+      - name: Build project
+        shell: bash
+        run: |
+          cd navicat-keygen
+          vcpkg integrate install
+          
+          MSBuild.exe ./navicat-keygen.sln -p:Configuration=Release -p:Platform=x64
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: windows-x64-build
+          path: ${{ GITHUB.WORKSPACE }}/navicat-keygen/bin/x64-Release/*.exe
+          retention-days: 7
