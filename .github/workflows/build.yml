@@ -35,7 +35,8 @@ jobs:
           cmake --build . -- -j4
 
           mkdir bin
-          mv navicat-keygen navicat-patcher bin     
+          mv navicat-keygen navicat-patcher bin
+          strip bin/*
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
@@ -76,6 +77,8 @@ jobs:
           vcpkg integrate install
           
           MSBuild.exe ./navicat-keygen.sln -p:Configuration=Release -p:Platform=x64
+
+          strip bin/x64-Release/*
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
