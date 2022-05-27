@@ -78,7 +78,7 @@ jobs:
           
           MSBuild.exe ./navicat-keygen.sln -p:Configuration=Release -p:Platform=x64
 
-          strip bin/x64-Release/*
+          strip bin/x64-Release/*.exe
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
