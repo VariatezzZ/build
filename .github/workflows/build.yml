@@ -2,7 +2,7 @@ name: Build
 on: 
   workflow_dispatch: 
   schedule:
-    - cron: "00 22 * * 0"
+    - cron: "0 22 15 * *"
   push:
     paths:
       - ".github/workflows/build.yml"
