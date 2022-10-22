@@ -49,7 +49,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Add MSBuild to PATH
-        uses: Dana-Prajea/Setup-MSBuild@v1.1
+        uses: microsoft/setup-msbuild@v1.1.3
+        with:
+          msbuild-architecture: x64
 
       - name: Install dependencies
         shell: bash
