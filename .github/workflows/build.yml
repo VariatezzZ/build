@@ -43,7 +43,7 @@ jobs:
         with:
           name: linux-x64-build
           path: ${{ GITHUB.WORKSPACE }}/navicat-keygen/build/bin/*
-          retention-days: 7
+          retention-days: 30
 
   windows-x64-build: 
     runs-on: windows-latest
@@ -87,4 +87,4 @@ jobs:
         with:
           name: windows-x64-build
           path: ${{ GITHUB.WORKSPACE }}/navicat-keygen/bin/x64-Release/*.exe
-          retention-days: 7
+          retention-days: 30
