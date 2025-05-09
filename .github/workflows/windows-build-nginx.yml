@@ -1,0 +1,109 @@
+name: Windows-Build-Nginx
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/windows-build-nginx.yml"
+
+jobs:
+  windows-x64-build:
+   runs-on: windows-latest
+   steps:
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+      with:
+        msbuild-architecture: x64
+        vs-version: '[17.13.35825.156,17.13.35825.156]'
+
+    - name: Add Msys2
+      uses: msys2/setup-msys2@v2
+      with:
+        update: false
+        install: >-
+          curl
+          git
+          make
+          tree
+
+    - name: Add StrawberryPerl
+      uses: shogo82148/actions-setup-perl@v1
+      with:
+        perl-version: "5"
+        distribution: strawberry
+
+    - name: Clone nginx source code
+      shell: msys2 {0}
+      run: |
+        git clone -b release-1.28.0 https://github.com/nginx/nginx.git
+
+    - name: Download dependencies
+      shell: msys2 {0}
+      run: |
+        cd nginx
+        curl -OL https://raw.githubusercontent.com/VariatezzZ/build/refs/heads/main/nginx.patch
+        git apply nginx.patch
+        mkdir -p objs/lib
+        cd objs/lib
+        curl -OL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.45/pcre2-10.45.tar.gz
+        curl -OL https://zlib.net/zlib-1.3.1.tar.gz
+        curl -OL https://github.com/openssl/openssl/releases/download/openssl-3.5.0/openssl-3.5.0.tar.gz
+        tar xf pcre2-10.45.tar.gz && mv pcre2-10.45 pcre2
+        tar xf zlib-1.3.1.tar.gz && mv zlib-1.3.1 zlib
+        tar xf openssl-3.5.0.tar.gz && mv openssl-3.5.0 openssl
+        cd -
+        git clone https://github.com/aperezdc/ngx-fancyindex.git
+        auto/configure \
+          --with-cc=cl \
+          --prefix= \
+          --conf-path=conf/nginx.conf \
+          --pid-path=logs/nginx.pid \
+          --http-log-path=logs/access.log \
+          --error-log-path=logs/error.log \
+          --sbin-path=nginx.exe \
+          --http-client-body-temp-path=temp/client_body_temp \
+          --http-proxy-temp-path=temp/proxy_temp \
+          --http-fastcgi-temp-path=temp/fastcgi_temp \
+          --http-scgi-temp-path=temp/scgi_temp \
+          --http-uwsgi-temp-path=temp/uwsgi_temp \
+          --with-cc-opt=-DFD_SETSIZE=1024 \
+          --with-pcre=objs/lib/pcre2 \
+          --with-zlib=objs/lib/zlib \
+          --with-openssl=objs/lib/openssl \
+          --with-openssl-opt=no-asm \
+          --with-file-aio \
+          --with-http_ssl_module \
+          --with-http_v2_module \
+          --with-http_realip_module \
+          --with-http_auth_request_module \
+          --with-http_stub_status_module \
+          --with-stream \
+          --with-stream_ssl_module \
+          --with-stream_realip_module \
+          --with-http_addition_module \
+          --with-http_dav_module \
+          --add-module=ngx-fancyindex
+        cd ..
+
+    - name: Build nginx
+      shell: cmd
+      run: |
+        cd nginx
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+        set CL=/WX-
+        nmake
+
+    - name: Packing
+      shell: msys2 {0}
+      run: |
+        cd nginx
+        mkdir -p temp logs
+        mv docs/html .
+        mv objs/nginx.exe .
+        /c/Program\ Files/7-Zip/7z a nginx.zip nginx.exe conf contrib docs html logs temp
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-x64-build-nginx
+        path: ${{ GITHUB.WORKSPACE }}/nginx/nginx.zip
+        retention-days: 7
