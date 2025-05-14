@@ -9,12 +9,6 @@ jobs:
   windows-x64-build:
    runs-on: windows-latest
    steps:
-    - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@v2
-      with:
-        msbuild-architecture: x64
-        vs-version: '[17.13.35825.156,17.13.35825.156]'
-
     - name: Add Msys2
       uses: msys2/setup-msys2@v2
       with:
@@ -92,18 +86,24 @@ jobs:
         set CL=/WX-
         nmake
 
-    - name: Packing
+    - name: Prepare packing
       shell: msys2 {0}
       run: |
         cd nginx
         mkdir -p temp logs
         mv docs/html .
         mv objs/nginx.exe .
-        /c/Program\ Files/7-Zip/7z a nginx.zip nginx.exe conf contrib docs html logs temp
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: windows-x64-build-nginx
-        path: ${{ GITHUB.WORKSPACE }}/nginx/nginx.zip
+        name: nginx
+        path: |
+          ${{ GITHUB.WORKSPACE }}/nginx/nginx.exe
+          ${{ GITHUB.WORKSPACE }}/nginx/conf
+          ${{ GITHUB.WORKSPACE }}/nginx/contrib
+          ${{ GITHUB.WORKSPACE }}/nginx/docs
+          ${{ GITHUB.WORKSPACE }}/nginx/html
+          ${{ GITHUB.WORKSPACE }}/nginx/logs
+          ${{ GITHUB.WORKSPACE }}/nginx/temp
         retention-days: 7
