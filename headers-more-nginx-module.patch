@@ -1,0 +1,57 @@
+diff --git a/src/ngx_http_headers_more_filter_module.c b/src/ngx_http_headers_more_filter_module.c
+index 0bb6fec..19c6ea4 100644
+--- a/src/ngx_http_headers_more_filter_module.c
++++ b/src/ngx_http_headers_more_filter_module.c
+@@ -7,6 +7,7 @@
+ #ifndef DDEBUG
+ #define DDEBUG 0
+ #endif
++#include <ngx_config.h>
+ #include "ddebug.h"
+ 
+ 
+diff --git a/src/ngx_http_headers_more_headers_in.c b/src/ngx_http_headers_more_headers_in.c
+index 983be5b..c996945 100644
+--- a/src/ngx_http_headers_more_headers_in.c
++++ b/src/ngx_http_headers_more_headers_in.c
+@@ -7,6 +7,7 @@
+ #ifndef DDEBUG
+ #define DDEBUG 0
+ #endif
++#include <ngx_config.h>
+ #include "ddebug.h"
+ 
+ 
+@@ -784,7 +785,7 @@ ngx_http_set_builtin_multi_header(ngx_http_request_t *r,
+ 
+         dd("clear multi-value headers: %d", nelts);
+ #endif
+-        
++
+         *headers = NULL;
+     }
+ 
+diff --git a/src/ngx_http_headers_more_headers_out.c b/src/ngx_http_headers_more_headers_out.c
+index 2a95b5f..6b72120 100644
+--- a/src/ngx_http_headers_more_headers_out.c
++++ b/src/ngx_http_headers_more_headers_out.c
+@@ -7,6 +7,7 @@
+ #ifndef DDEBUG
+ #define DDEBUG 0
+ #endif
++#include <ngx_config.h>
+ #include "ddebug.h"
+ 
+ 
+diff --git a/src/ngx_http_headers_more_util.c b/src/ngx_http_headers_more_util.c
+index e1f3636..a309e79 100644
+--- a/src/ngx_http_headers_more_util.c
++++ b/src/ngx_http_headers_more_util.c
+@@ -7,6 +7,7 @@
+ #ifndef DDEBUG
+ #define DDEBUG 0
+ #endif
++#include <ngx_config.h>
+ #include "ddebug.h"
+ 
+ 

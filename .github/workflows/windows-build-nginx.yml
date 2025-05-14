@@ -47,6 +47,10 @@ jobs:
         cd -
         git clone https://github.com/aperezdc/ngx-fancyindex.git
         git clone https://github.com/openresty/headers-more-nginx-module.git
+        cd headers-more-nginx-module
+        curl -OL https://raw.githubusercontent.com/VariatezzZ/build/refs/heads/main/headers-more-nginx-module.patch
+        git apply headers-more-nginx-module.patch
+        cd ..
         auto/configure \
           --with-cc=cl \
           --prefix= \
