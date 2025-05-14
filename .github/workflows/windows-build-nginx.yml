@@ -46,6 +46,7 @@ jobs:
         tar xf openssl-3.5.0.tar.gz && mv openssl-3.5.0 openssl
         cd -
         git clone https://github.com/aperezdc/ngx-fancyindex.git
+        git clone https://github.com/openresty/headers-more-nginx-module.git
         auto/configure \
           --with-cc=cl \
           --prefix= \
@@ -75,6 +76,7 @@ jobs:
           --with-stream_realip_module \
           --with-http_addition_module \
           --with-http_dav_module \
+          --add-module=headers-more-nginx-module\
           --add-module=ngx-fancyindex
         cd ..
 
