@@ -1,4 +1,4 @@
-name: app-build-action
+name: simple-live-build
 #推送Tag时触发
 on:
   push:
