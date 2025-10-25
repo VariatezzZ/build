@@ -13,7 +13,7 @@ jobs:
       - name: Clone source code
         shell: bash
         run: |
-          git clone -b dev https://github.com/xiaoyaocz/dart_simple_live.git
+          git clone --single-branch https://github.com/qiunoyi/dart_simple_live.git
 
       # APK签名设置
       - name: Download Android keystore
@@ -41,7 +41,7 @@ jobs:
       - name: Flutter action
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.22.x"
+          flutter-version: "3.35.x"
           cache: true
 
       #更新Flutter的packages
@@ -50,14 +50,11 @@ jobs:
           cd dart_simple_live/simple_live_app
           flutter pub get
 
-      # 设置flutter_distributor环境
-      - name: Install flutter_distributor
-        run: dart pub global activate flutter_distributor
-
       #打包APK
       - name: Build APK
         run: |
           cd dart_simple_live/simple_live_app
+          sed -i '4s/^/#/' android/gradle.properties
           flutter build apk --release --split-per-abi
 
       #上传APK至Artifacts
@@ -76,17 +73,18 @@ jobs:
       - name: Clone source code
         shell: cmd
         run: |
-          git clone -b dev https://github.com/xiaoyaocz/dart_simple_live.git
+          git clone --single-branch https://github.com/qiunoyi/dart_simple_live.git
 
       # 设置Flutter环境
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.22.x"
+          flutter-version: "3.35.x"
           cache: true
 
       - name: Enable Flutter Desktop
         run: flutter config --enable-windows-desktop
+
       - name: Restore Packages
         run: |
           cd dart_simple_live/simple_live_app
