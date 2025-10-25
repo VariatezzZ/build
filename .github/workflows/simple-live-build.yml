@@ -55,6 +55,8 @@ jobs:
         run: |
           cd dart_simple_live/simple_live_app
           sed -i '4s/^/#/' android/gradle.properties
+          sed -i '81s|^[[:space:]]*//||' android/app/build.gradle
+          sed -i '87s|^|//|' android/app/build.gradle
           flutter build apk --release --split-per-abi
 
       #上传APK至Artifacts
