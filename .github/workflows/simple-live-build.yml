@@ -13,10 +13,7 @@ jobs:
       - name: Clone source code
         shell: bash
         run: |
-          git clone --single-branch -b dev https://github.com/xiaoyaocz/dart_simple_live.git
-          cd dart_simple_live
-          git fetch origin pull/865/head:pr865
-          git checkout pr865
+          git clone --single-branch -b dev_v1.11.4 https://github.com/xiaoyaocz/dart_simple_live.git
 
       # APK签名设置
       - name: Download Android keystore
@@ -75,10 +72,7 @@ jobs:
       - name: Clone source code
         shell: cmd
         run: |
-          git clone --single-branch -b dev https://github.com/xiaoyaocz/dart_simple_live.git
-          cd dart_simple_live
-          git fetch origin pull/865/head:pr865
-          git checkout pr865
+          git clone --single-branch -b dev_v1.11.4 https://github.com/xiaoyaocz/dart_simple_live.git
 
       # 设置Flutter环境
       - name: Setup Flutter
