@@ -1,0 +1,114 @@
+name: Build v2rayNG APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/v2rayng-build.yml"
+
+permissions:
+  contents: write
+
+env:
+  NDK_VERSION: '29.0.14206865'
+  NDK_HOME: ndk/$NDK_VERSION
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone source code
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/2dust/v2rayNG.git
+          cd v2rayNG && rm -rf hev-socks5-tunnel AndroidLibXrayLite
+          git clone --depth 1 https://github.com/heiher/hev-socks5-tunnel.git
+          git clone --depth 1 https://github.com/2dust/AndroidLibXrayLite.git
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          log-accepted-android-sdk-licenses: false
+          cmdline-tools-version: '14742923'
+          packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+
+      - name: Install NDK
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            --channel=0 \
+            --install "ndk;${{ env.NDK_VERSION }}"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+          sed -i '10i\
+          \
+              ndkVersion = "${{ env.NDK_VERSION }}"' v2rayNG/V2rayNG/app/build.gradle.kts
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+
+      # 自编译 hev-socks5-tunnel
+      - name: Compile libhevtun
+        run: |
+          cd v2rayNG
+          cd hev-socks5-tunnel && git submodule update --init --recursive && cd -
+          bash compile-hevtun.sh
+
+      - name: Copy libhevtun
+        run: |
+          cd v2rayNG
+          cp -rf libs V2rayNG/app
+
+      # 自编译 AndroidLibXrayLite → libv2ray.aar
+      - name: Build libv2ray.aar
+        run: |
+          cd v2rayNG/AndroidLibXrayLite
+          sed -i 's|^replace github.com/xtls/xray-core|// &|' go.mod
+          mkdir -p assets data
+
+          bash gen_assets.sh download
+          cp -v data/*.dat assets/ 2>/dev/null || true
+
+          export GOPATH=$HOME/go
+          export PATH=$PATH:$HOME/go/bin
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          go mod tidy
+          gomobile bind -v -androidapi 24 -trimpath \
+            -ldflags='-s -w -buildid= -checklinkname=0' ./
+
+          ls -lh libv2ray.aar
+          cp libv2ray.aar ../V2rayNG/app/libs/
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Decode Keystore
+        uses: timheuer/base64-to-file@v2.0.0
+        id: android_keystore
+        with:
+          fileName: "android_keystore.jks"
+          encodedString: ${{ secrets.KEYSTORE_BASE64 }}
+
+      - name: Build APK
+        run: |
+          cd v2rayNG/V2rayNG
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
+          chmod 755 gradlew
+          ./gradlew licenseFdroidReleaseReport
+          ./gradlew assemblePlaystoreRelease \
+            -Pandroid.injected.signing.store.file=${{ steps.android_keystore.outputs.filePath }} \
+            -Pandroid.injected.signing.store.password=${{ secrets.STORE_PASSWORD }} \
+            -Pandroid.injected.signing.key.alias=${{ secrets.V2RAYNG_ALIAS }} \
+            -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }}
+
+      - name: Upload arm64-v8a APK
+        uses: actions/upload-artifact@v7
+        if: success()
+        with:
+          name: arm64-v8a
+          path: v2rayNG/V2rayNG/app/build/outputs/apk/playstore/release/*arm64-v8a*.apk
