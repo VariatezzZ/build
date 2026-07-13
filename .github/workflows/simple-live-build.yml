@@ -97,6 +97,7 @@ jobs:
       - name: Build Windows
         run: |
           cd dart_simple_live/simple_live_app
+          sed -i '/project(simple_live_app LANGUAGES CXX)/a add_definitions(-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)' windows/CMakeLists.txt
           flutter_distributor package --platform windows --targets zip --skip-clean
 
       # 上传Windows至Artifacts
