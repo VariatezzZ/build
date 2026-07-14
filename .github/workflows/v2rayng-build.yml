@@ -99,7 +99,6 @@ jobs:
           cd v2rayNG/V2rayNG
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           chmod 755 gradlew
-          ./gradlew licenseFdroidReleaseReport
           ./gradlew assemblePlaystoreRelease \
             -Pandroid.injected.signing.store.file=${{ steps.android_keystore.outputs.filePath }} \
             -Pandroid.injected.signing.store.password=${{ secrets.STORE_PASSWORD }} \
