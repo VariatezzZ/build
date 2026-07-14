@@ -53,6 +53,7 @@ jobs:
         run: |
           cd v2rayNG
           cd hev-socks5-tunnel && git submodule update --init --recursive && cd -
+          sed -i '19s/.*/ABIS="arm64-v8a"/' compile-hevtun.sh
           bash compile-hevtun.sh
 
       - name: Copy libhevtun
@@ -100,6 +101,7 @@ jobs:
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           chmod 755 gradlew
           ./gradlew assemblePlaystoreRelease \
+            -PABI_FILTERS="arm64-v8a" \
             -Pandroid.injected.signing.store.file=${{ steps.android_keystore.outputs.filePath }} \
             -Pandroid.injected.signing.store.password=${{ secrets.STORE_PASSWORD }} \
             -Pandroid.injected.signing.key.alias=${{ secrets.V2RAYNG_ALIAS }} \
