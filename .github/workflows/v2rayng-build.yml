@@ -47,6 +47,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: 'stable'
+          cache: false
 
       # 自编译 hev-socks5-tunnel
       - name: Compile libhevtun
@@ -76,10 +77,10 @@ jobs:
           go install golang.org/x/mobile/cmd/gomobile@latest
           gomobile init
           go mod tidy
-          gomobile bind -v -androidapi 24 -trimpath \
+          gomobile bind -v -target android/arm64 -androidapi 24 -trimpath \
             -ldflags='-s -w -buildid= -checklinkname=0' ./
 
-          ls -lh libv2ray.aar
+          zipinfo libv2ray.aar
           cp libv2ray.aar ../V2rayNG/app/libs/
 
       - name: Setup Java
