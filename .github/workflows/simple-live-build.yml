@@ -5,20 +5,26 @@ on:
   push:
     paths:
       - ".github/workflows/simple-live-build.yml"
+env:
+  JAVA_VERSION: "17"
+  ANDROID_API_LEVEL: "36"
+  ANDROID_BUILD_TOOLS_VERSION: "35.0.0"
+  ANDROID_NDK_VERSION: "28.2.13676358"
+
 jobs:
   build-android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       #克隆源代码
       - name: Clone source code
         shell: bash
         run: |
-          git clone --single-branch -b dev_v1.11.4 https://github.com/xiaoyaocz/dart_simple_live.git
+          git clone --single-branch -b dev https://github.com/xiaoyaocz/dart_simple_live.git
 
       # APK签名设置
       - name: Download Android keystore
         id: android_keystore
-        uses: timheuer/base64-to-file@v1.2
+        uses: timheuer/base64-to-file@v2
         with:
           fileName: keystore.jks
           encodedString: ${{ secrets.KEYSTORE_BASE64 }}
@@ -31,24 +37,43 @@ jobs:
           echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> dart_simple_live/simple_live_app/android/key.properties
 
       #设置JAVA环境
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: "zulu"
-          java-version: "17"
+          java-version: ${{ env.JAVA_VERSION }}
           cache: "gradle"
+
+      #设置Android SDK环境
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-${{ env.ANDROID_API_LEVEL }}
+            build-tools;${{ env.ANDROID_BUILD_TOOLS_VERSION }}
+            ndk;${{ env.ANDROID_NDK_VERSION }}
 
       #设置Flutter
       - name: Flutter action
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.38.x"
+          channel: stable
+          flutter-version-file: dart_simple_live/simple_live_app/.fvmrc
           cache: true
+
+      - name: Configure Android JDK
+        run: flutter config --jdk-dir "$JAVA_HOME"
 
       #更新Flutter的packages
       - name: Restore packages
         run: |
           cd dart_simple_live/simple_live_app
           flutter pub get
+
+      - name: Validate Android toolchain
+        run: |
+          cd dart_simple_live/simple_live_app
+          flutter analyze --suggestions
 
       #打包APK
       - name: Build APK
@@ -58,7 +83,7 @@ jobs:
 
       #上传APK至Artifacts
       - name: Upload APK to Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android
           path: |
@@ -66,19 +91,20 @@ jobs:
 
   # 打包Windows
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       #克隆源代码
       - name: Clone source code
         shell: cmd
         run: |
-          git clone --single-branch -b dev_v1.11.4 https://github.com/xiaoyaocz/dart_simple_live.git
+          git clone --single-branch -b dev https://github.com/xiaoyaocz/dart_simple_live.git
 
-      # 设置Flutter环境
-      - name: Setup Flutter
+      #设置Flutter
+      - name: Flutter action
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.38.x"
+          channel: stable
+          flutter-version-file: dart_simple_live/simple_live_app/.fvmrc
           cache: true
 
       - name: Enable Flutter Desktop
@@ -97,12 +123,11 @@ jobs:
       - name: Build Windows
         run: |
           cd dart_simple_live/simple_live_app
-          sed -i '/project(simple_live_app LANGUAGES CXX)/a add_definitions(-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)' windows/CMakeLists.txt
           flutter_distributor package --platform windows --targets zip --skip-clean
 
       # 上传Windows至Artifacts
       - name: Upload Windows APP to Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows
           path: |
