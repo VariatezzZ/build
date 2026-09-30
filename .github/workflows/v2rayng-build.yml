@@ -67,6 +67,7 @@ jobs:
         run: |
           cd v2rayNG/AndroidLibXrayLite
           sed -i 's|^replace github.com/xtls/xray-core|// &|' go.mod
+          go get github.com/xtls/xray-core@main
           mkdir -p assets data
 
           bash gen_assets.sh download
