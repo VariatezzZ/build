@@ -7,7 +7,7 @@ on:
 
 jobs:
   windows-x64-build:
-   runs-on: windows-latest
+   runs-on: windows-2022
    steps:
     - name: Get MSVC environment
       shell: cmd
