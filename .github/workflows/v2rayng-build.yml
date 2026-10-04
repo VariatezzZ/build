@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 env:
-  NDK_VERSION: '29.0.14206865'
+  NDK_VERSION: '30.0.16248370'
   NDK_HOME: ndk/$NDK_VERSION
 
 jobs:
