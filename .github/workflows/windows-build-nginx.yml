@@ -40,7 +40,7 @@ jobs:
     - name: Clone nginx source code
       shell: msys2 {0}
       run: |
-        git clone --depth 1 -b release-1.30.1 https://github.com/nginx/nginx.git
+        git clone --depth 1 -b release-1.30.5 https://github.com/nginx/nginx.git
 
     - name: Download dependencies
       shell: msys2 {0}
@@ -50,12 +50,12 @@ jobs:
         git apply nginx.patch
         mkdir -p objs/lib
         cd objs/lib
-        curl -fSL --retry 3 --retry-delay 5 -OL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.47/pcre2-10.47.tar.gz
+        curl -fSL --retry 3 --retry-delay 5 -OL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.gz
         curl -fSL --retry 3 --retry-delay 5 -OL https://zlib.net/zlib-1.3.2.tar.gz
-        curl -fSL --retry 3 --retry-delay 5 -OL https://github.com/openssl/openssl/releases/download/openssl-3.6.2/openssl-3.6.2.tar.gz
-        tar xf pcre2-10.47.tar.gz && mv pcre2-10.47 pcre2
+        curl -fSL --retry 3 --retry-delay 5 -OL https://github.com/openssl/openssl/releases/download/openssl-4.0.3/openssl-4.0.3.tar.gz
+        tar xf pcre2-10.49.tar.gz && mv pcre2-10.49 pcre2
         tar xf zlib-1.3.2.tar.gz && mv zlib-1.3.2 zlib
-        tar xf openssl-3.6.2.tar.gz && mv openssl-3.6.2 openssl
+        tar xf openssl-4.0.3.tar.gz && mv openssl-4.0.3 openssl
         cd -
         git clone https://github.com/aperezdc/ngx-fancyindex.git
         git clone https://github.com/openresty/headers-more-nginx-module.git
