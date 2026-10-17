@@ -72,6 +72,7 @@ jobs:
           go get github.com/xtls/xray-core@main
           mkdir -p assets data
 
+          sed -i 's|Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite\.dat|VariatezzZ/geosite/releases/latest/download/geosite.dat|g' gen_assets.sh
           bash gen_assets.sh download
           cp -v data/*.dat assets/ 2>/dev/null || true
 
