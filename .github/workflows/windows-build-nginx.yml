@@ -41,7 +41,7 @@ jobs:
     - name: Clone nginx source code
       shell: msys2 {0}
       run: |
-        git clone --depth 1 -b release-1.30.5 https://github.com/nginx/nginx.git
+        git clone --depth 1 -b release-1.30.6 https://github.com/nginx/nginx.git
 
     - name: Download dependencies
       shell: msys2 {0}
