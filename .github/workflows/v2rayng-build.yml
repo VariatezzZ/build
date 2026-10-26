@@ -70,8 +70,8 @@ jobs:
           go get github.com/xtls/xray-core@main
           mkdir -p assets data
 
-          sed -i -e '30s|https://github\.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip\.dat|https://github.com/Meo597/geoip/releases/latest/download/geoip-only-cn-private.dat|' gen_assets.sh
-          sed -i -e '36s|https://raw\.githubusercontent\.com/Loyalsoldier/geoip/release/geoip-only-cn-private\.dat|https://github.com/Meo597/geoip/releases/latest/download/geoip-only-cn-private.dat|' gen_assets.sh
+          sed -i -e '30s|Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip\.dat|VariatezzZ/geoip/releases/latest/download/geoip.dat|' gen_assets.sh
+          sed -i -e '36s|raw\.githubusercontent\.com/Loyalsoldier/geoip/release/geoip-only-cn-private\.dat|github.com/VariatezzZ/geoip/releases/latest/download/geoip-only-cn-private.dat|' gen_assets.sh
           sed -i 's|Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite\.dat|VariatezzZ/geosite/releases/latest/download/geosite.dat|g' gen_assets.sh
           bash gen_assets.sh download
           cp -v data/*.dat assets/ 2>/dev/null || true
