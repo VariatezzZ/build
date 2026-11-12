@@ -58,7 +58,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version-file: dart_simple_live/simple_live_app/.fvmrc
+          flutter-version: 3.47.9
           cache: true
 
       - name: Configure Android JDK
@@ -104,8 +104,9 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version-file: dart_simple_live/simple_live_app/.fvmrc
+          flutter-version: 3.47.9
           cache: true
+          pub-cache: false
 
       - name: Enable Flutter Desktop
         run: flutter config --enable-windows-desktop
