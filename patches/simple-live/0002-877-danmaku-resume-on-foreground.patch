@@ -1,0 +1,40 @@
+From 38d2ec7e3adcde5c49b50a828dccc23886c1e42c Mon Sep 17 00:00:00 2001
+From: blindfs <blindfs19@gmail.com>
+Date: Sat, 14 Nov 2026 09:50:27 +0000
+Subject: [PATCH] fix(player): resume danmaku after app returns to foreground
+
+Based on PR #877. Drop the no-op resume call in resetRoom and pair the foreground resume with an explicit pause when the app is backgrounded.
+---
+ .../lib/modules/live_room/live_room_controller.dart            | 3 +++
+ .../lib/modules/live_room/live_room_controller.dart            | 3 +++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/simple_live_app/lib/modules/live_room/live_room_controller.dart b/simple_live_app/lib/modules/live_room/live_room_controller.dart
+index bf689b5..44f20da 100644
+--- a/simple_live_app/lib/modules/live_room/live_room_controller.dart
++++ b/simple_live_app/lib/modules/live_room/live_room_controller.dart
+@@ -1013,2 +1013,3 @@ ${error?.stackTrace}''');
+       danmakuController?.clear();
++      danmakuController?.pause();
+       isBackground = true;
+@@ -1018,2 +1019,4 @@ ${error?.stackTrace}''');
+       Log.d("返回前台");
++      // 恢复弹幕
++      danmakuController?.resume();
+       isBackground = false;
+diff --git a/simple_live_tv_app/lib/modules/live_room/live_room_controller.dart b/simple_live_tv_app/lib/modules/live_room/live_room_controller.dart
+index a5463ad..788e9e2 100644
+--- a/simple_live_tv_app/lib/modules/live_room/live_room_controller.dart
++++ b/simple_live_tv_app/lib/modules/live_room/live_room_controller.dart
+@@ -430,2 +430,3 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
+       danmakuController?.clear();
++      danmakuController?.pause();
+       isBackground = true;
+@@ -435,2 +436,4 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
+       Log.d("返回前台");
++      // 恢复弹幕
++      danmakuController?.resume();
+       isBackground = false;
+-- 
+2.47.3
+
