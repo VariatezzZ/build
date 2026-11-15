@@ -144,6 +144,12 @@ index 44fc010..5d4f08c 100644
  
  class FollowSettingsPage extends GetView<AppSettingsController> {
    const FollowSettingsPage({super.key});
+@@ -58,4 +57,4 @@ class FollowSettingsPage extends GetView<AppSettingsController> {
+                     var threadCount = controller.updateFollowThreadCount.value;
+                     var displayValue = threadCount == 0
+-                        ? "自动 (根据 CPU 核心数)"
++                        ? "自动 (按站点)"
+                         : "$threadCount";
 @@ -62,7 +61,7 @@ class FollowSettingsPage extends GetView<AppSettingsController> {
  
                      return SettingsAction(
