@@ -1,0 +1,1260 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: opencode <opencode@local>
+Date: Sun, 15 Nov 2026 00:00:00 +0800
+Subject: [PATCH] feat(follow): speed up live status refresh
+
+Add a lightweight status model so a single request can return live state,
+start time and anchor uid without fetching full room details.
+
+- Add LiveStatusInfo plus LiveSite.getLiveStatusInfo with a default
+  implementation that falls back to getLiveStatus.
+- Bilibili: reuse buvid request, expose uid, add batch status query by uids
+  with 99 uid chunking.
+- Huya: query the mp.huya.com JSON endpoint first with a 5s timeout and fall
+  back to the HTML page.
+- Douyu and Douyin: return start time and popularity from the status call.
+- HttpClient: allow a per request timeout while keeping the 20s default.
+- FollowService: per site concurrency pools, status cache with TTL, single
+  flight per room, bounded retry with breaker, incremental re-sort and
+  resume refresh.
+- Persist last status, last check time, last start time and anchor uid in
+  new optional Hive fields.
+---
+diff --git a/simple_live_app/lib/models/db/follow_user.dart b/simple_live_app/lib/models/db/follow_user.dart
+index 7de513d..c488a9f 100644
+--- a/simple_live_app/lib/models/db/follow_user.dart
++++ b/simple_live_app/lib/models/db/follow_user.dart
+@@ -12,7 +12,11 @@ class FollowUser {
+     required this.userName,
+     required this.face,
+     required this.addTime,
+-    this.tag = "全部"
++    this.tag = "全部",
++    this.lastLiveStatus,
++    this.lastCheckedAt,
++    this.lastLiveStartTime,
++    this.anchorUid,
+   });
+ 
+   ///id=siteId_roomId
+@@ -37,6 +41,22 @@ class FollowUser {
+   @HiveField(6)
+   String tag;
+ 
++  /// 上次查询到的直播状态, 0=未知 1=未开播 2=直播中
++  @HiveField(7)
++  int? lastLiveStatus;
++
++  /// 上次查询时间, 毫秒时间戳
++  @HiveField(8)
++  int? lastCheckedAt;
++
++  /// 上次查询到的开播时间, 秒时间戳
++  @HiveField(9)
++  String? lastLiveStartTime;
++
++  /// 主播在该平台的唯一ID, 目前用于B站批量查询
++  @HiveField(10)
++  String? anchorUid;
++
+   /// 直播状态
+   /// 0=未知(加载中) 1=未开播 2=直播中
+   Rx<int> liveStatus = 0.obs;
+diff --git a/simple_live_app/lib/models/db/follow_user.g.dart b/simple_live_app/lib/models/db/follow_user.g.dart
+index 474f3b4..3ec4dbe 100644
+--- a/simple_live_app/lib/models/db/follow_user.g.dart
++++ b/simple_live_app/lib/models/db/follow_user.g.dart
+@@ -24,13 +24,17 @@ class FollowUserAdapter extends TypeAdapter<FollowUser> {
+       face: fields[4] as String,
+       addTime: fields[5] as DateTime,
+       tag: fields[6] ?? "全部",
++      lastLiveStatus: fields[7] as int?,
++      lastCheckedAt: fields[8] as int?,
++      lastLiveStartTime: fields[9] as String?,
++      anchorUid: fields[10] as String?,
+     );
+   }
+ 
+   @override
+   void write(BinaryWriter writer, FollowUser obj) {
+     writer
+-      ..writeByte(7)
++      ..writeByte(11)
+       ..writeByte(0)
+       ..write(obj.id)
+       ..writeByte(1)
+@@ -44,7 +48,15 @@ class FollowUserAdapter extends TypeAdapter<FollowUser> {
+       ..writeByte(5)
+       ..write(obj.addTime)
+       ..writeByte(6)
+-      ..write(obj.tag);
++      ..write(obj.tag)
++      ..writeByte(7)
++      ..write(obj.lastLiveStatus)
++      ..writeByte(8)
++      ..write(obj.lastCheckedAt)
++      ..writeByte(9)
++      ..write(obj.lastLiveStartTime)
++      ..writeByte(10)
++      ..write(obj.anchorUid);
+   }
+ 
+   @override
+diff --git a/simple_live_app/lib/modules/follow_user/follow_user_controller.dart b/simple_live_app/lib/modules/follow_user/follow_user_controller.dart
+index 446957f..856ce0a 100644
+--- a/simple_live_app/lib/modules/follow_user/follow_user_controller.dart
++++ b/simple_live_app/lib/modules/follow_user/follow_user_controller.dart
+@@ -42,11 +42,12 @@ class FollowUserController extends BasePageController<FollowUser> {
+       filterData();
+     });
+     super.onInit();
++    unawaited(refreshData(force: false));
+   }
+ 
+   @override
+-  Future refreshData() async {
+-    await FollowService.instance.loadData();
++  Future refreshData({bool force = true}) async {
++    await FollowService.instance.loadData(force: force);
+     updateTagList();
+     super.refreshData();
+   }
+diff --git a/simple_live_app/lib/modules/follow_user/follow_user_page.dart b/simple_live_app/lib/modules/follow_user/follow_user_page.dart
+index 354f391..bfd2935 100644
+--- a/simple_live_app/lib/modules/follow_user/follow_user_page.dart
++++ b/simple_live_app/lib/modules/follow_user/follow_user_page.dart
+@@ -152,7 +152,7 @@ class FollowUserPage extends GetView<FollowUserController> {
+               crossAxisSpacing: 12,
+               crossAxisCount: count,
+               pageController: controller,
+-              firstRefresh: true,
++              firstRefresh: false,
+               showPCRefreshButton: false,
+               itemBuilder: (_, i) {
+                 var item = controller.list[i];
+diff --git a/simple_live_app/lib/modules/settings/follow_settings_page.dart b/simple_live_app/lib/modules/settings/follow_settings_page.dart
+index 44fc010..5d4f08c 100644
+--- a/simple_live_app/lib/modules/settings/follow_settings_page.dart
++++ b/simple_live_app/lib/modules/settings/follow_settings_page.dart
+@@ -6,7 +6,6 @@ import 'package:simple_live_app/services/follow_service.dart';
+ import 'package:simple_live_app/widgets/settings/settings_action.dart';
+ import 'package:simple_live_app/widgets/settings/settings_card.dart';
+ import 'package:simple_live_app/widgets/settings/settings_switch.dart';
+-import 'dart:io';
+ 
+ class FollowSettingsPage extends GetView<AppSettingsController> {
+   const FollowSettingsPage({super.key});
+@@ -62,7 +61,7 @@ class FollowSettingsPage extends GetView<AppSettingsController> {
+ 
+                     return SettingsAction(
+                       title: "更新并发数",
+-                      subtitle: "0 = 自动根据 CPU 核心数优化（推荐），或手动设置 1-20",
++                      subtitle: "0 = 按站点自动优化, 或手动设置 1-20",
+                       value: displayValue,
+                       onTap: () {
+                         showConcurrencyDialog();
+@@ -105,8 +104,6 @@ class FollowSettingsPage extends GetView<AppSettingsController> {
+ 
+   void showConcurrencyDialog() {
+     var currentValue = controller.updateFollowThreadCount.value;
+-    var cpuCount = Platform.numberOfProcessors;
+-    var autoValue = (cpuCount * 2.5).round().clamp(4, 20);
+ 
+     Get.dialog(
+       AlertDialog(
+@@ -116,11 +113,7 @@ class FollowSettingsPage extends GetView<AppSettingsController> {
+           crossAxisAlignment: CrossAxisAlignment.start,
+           children: [
+             Text(
+-              "CPU 核心数: $cpuCount",
+-              style: const TextStyle(fontSize: 12, color: Colors.grey),
+-            ),
+-            Text(
+-              "自动推荐值: $autoValue",
++              "0 表示按站点自动优化并发, 手动值会作为每个站点的上限.",
+               style: const TextStyle(fontSize: 12, color: Colors.grey),
+             ),
+             const SizedBox(height: 16),
+@@ -134,7 +127,7 @@ class FollowSettingsPage extends GetView<AppSettingsController> {
+               spacing: 8,
+               runSpacing: 8,
+               children: [
+-                _buildQuickOption(0, "自动 ($autoValue)", currentValue),
++                _buildQuickOption(0, "自动", currentValue),
+                 _buildQuickOption(4, "4", currentValue),
+                 _buildQuickOption(8, "8", currentValue),
+                 _buildQuickOption(12, "12", currentValue),
+diff --git a/simple_live_app/lib/services/follow_service.dart b/simple_live_app/lib/services/follow_service.dart
+index fa22ba8..3cf5537 100644
+--- a/simple_live_app/lib/services/follow_service.dart
++++ b/simple_live_app/lib/services/follow_service.dart
+@@ -2,6 +2,7 @@ import 'dart:async';
+ import 'dart:collection';
+ import 'dart:convert';
+ import 'dart:io';
++import 'dart:math';
+ 
+ import 'package:file_picker/file_picker.dart';
+ import 'package:flutter/material.dart';
+@@ -17,8 +18,9 @@ import 'package:simple_live_app/app/utils.dart';
+ import 'package:simple_live_app/models/db/follow_user.dart';
+ import 'package:simple_live_app/models/db/follow_user_tag.dart';
+ import 'package:simple_live_app/services/db_service.dart';
++import 'package:simple_live_core/simple_live_core.dart';
+ 
+-class FollowService extends GetxService {
++class FollowService extends GetxService with WidgetsBindingObserver {
+   StreamSubscription<dynamic>? subscription;
+   static FollowService get instance => Get.find<FollowService>();
+ 
+@@ -40,16 +42,26 @@ class FollowService extends GetxService {
+   /// 当前tag的用户列表
+   RxList<FollowUser> curTagFollowList = RxList<FollowUser>();
+ 
+-  /// 已经更新状态的数量
+-  var updatedCount = 0;
+-
+   /// 是否正在更新
+   var updating = false.obs;
+ 
+   Timer? updateTimer;
+ 
++  /// 列表重排的防抖计时器
++  Timer? filterTimer;
++
++  /// 每个房间正在进行的请求, 避免重复发起
++  final Map<String, Future<void>> _inflight = {};
++
++  /// 每个站点连续失败次数
++  final Map<String, int> _siteFailures = {};
++
++  /// 站点熔断截止时间
++  final Map<String, DateTime> _siteBlockedUntil = {};
++
+   @override
+   void onInit() {
++    WidgetsBinding.instance.addObserver(this);
+     subscription = EventBus.instance.listen(Constant.kUpdateFollow, (p0) {
+       loadData(updateStatus: false);
+     });
+@@ -57,6 +69,13 @@ class FollowService extends GetxService {
+     super.onInit();
+   }
+ 
++  @override
++  void didChangeAppLifecycleState(AppLifecycleState state) {
++    if (state == AppLifecycleState.resumed) {
++      loadData();
++    }
++  }
++
+   // 添加标签
+   Future<void> addFollowUserTag(String tag) async {
+     // 判断待添加tag是否已存在，存在则return
+@@ -121,135 +140,349 @@ class FollowService extends GetxService {
+   }
+ 
+   void initTimer() {
+-    if (AppSettingsController.instance.autoUpdateFollowEnable.value) {
+-      updateTimer?.cancel();
+-      updateTimer = Timer.periodic(
+-        Duration(
+-            minutes:
+-                AppSettingsController.instance.autoUpdateFollowDuration.value),
+-        (timer) {
+-          Log.logPrint("Update Follow Timer");
+-          loadData();
+-        },
+-      );
+-    } else {
+-      updateTimer?.cancel();
++    updateTimer?.cancel();
++    if (!AppSettingsController.instance.autoUpdateFollowEnable.value) {
++      return;
+     }
++    // 定时器只负责驱动, 真正需要请求哪些主播由本地缓存的过期时间决定.
++    updateTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
++      loadData();
++    });
+   }
+ 
+-  Future<void> loadData({bool updateStatus = true}) async {
++  Future<void> loadData({bool updateStatus = true, bool force = false}) async {
+     var list = DBService.instance.getFollowList();
+     getAllTagList();
+     if (list.isEmpty) {
+-      updating.value = false;
+       followList.assignAll(list);
++      liveList.clear();
++      notLiveList.clear();
++      curTagFollowList.clear();
++      _updatedListController.add(0);
+       return;
+     }
+     followList.assignAll(list);
++    _hydrateStatusCache();
++    filterData();
+     if (updateStatus) {
+-      startUpdateStatus();
++      unawaited(startUpdateStatus(force: force));
++    }
++  }
++
++  /// 每个站点的默认并发数, 避免单站点突发流量触发风控.
++  int _siteConcurrency(String siteId) {
++    const siteLimits = <String, int>{
++      Constant.kBiliBili: 4,
++      Constant.kDouyu: 4,
++      Constant.kHuya: 3,
++      Constant.kDouyin: 2,
++    };
++    var limit = siteLimits[siteId] ?? 3;
++    var userLimit =
++        AppSettingsController.instance.updateFollowThreadCount.value;
++    if (userLimit > 0 && userLimit < limit) {
++      return userLimit;
+     }
++    return limit;
+   }
+ 
+-  /// 获取最优并发数
+-  /// 根据 CPU 核心数和用户设置自动计算
+-  int getOptimalConcurrency() {
+-    var userSetting = AppSettingsController.instance.updateFollowThreadCount.value;
++  /// 读取上次缓存的直播状态, 先展示再后台校验.
++  void _hydrateStatusCache() {
++    for (var item in followList) {
++      if (item.liveStatus.value != 0) {
++        continue;
++      }
++      if (item.lastLiveStatus == null) {
++        continue;
++      }
++      item.liveStatus.value = item.lastLiveStatus!;
++      item.liveStartTime = item.lastLiveStartTime;
++    }
++  }
+ 
+-    // 如果用户设置为 0，则自动根据 CPU 核心数计算
+-    if (userSetting == 0) {
+-      var cpuCount = Platform.numberOfProcessors;
+-      // 网络 I/O 密集型任务，并发数可以是 CPU 核心数的 2-3 倍
+-      var optimal = (cpuCount * 2.5).round();
+-      // 限制在合理范围内（最少 4，最多 20）
+-      return optimal.clamp(4, 20);
++  int _statusTtlSeconds(int status) {
++    if (status == 2) {
++      return 60;
++    }
++    if (status == 1) {
++      var configured =
++          AppSettingsController.instance.autoUpdateFollowDuration.value * 60;
++      return configured < 180 ? 180 : configured;
+     }
++    return 30;
++  }
+ 
+-    return userSetting;
++  bool _isStatusStale(FollowUser item) {
++    var checkedAt = item.lastCheckedAt;
++    if (checkedAt == null) {
++      return true;
++    }
++    var elapsed = DateTime.now().millisecondsSinceEpoch - checkedAt;
++    return elapsed >= _statusTtlSeconds(item.liveStatus.value) * 1000;
+   }
+ 
+-  /// 按平台交错排列，避免单一平台阻塞
+-  List<FollowUser> interleaveByPlatform(List<FollowUser> list) {
+-    // 按平台分组
+-    var grouped = <String, Queue<FollowUser>>{};
+-    for (var item in list) {
+-      grouped.putIfAbsent(item.siteId, () => Queue<FollowUser>()).add(item);
++  Future<void> startUpdateStatus({bool force = false}) async {
++    if (updating.value) {
++      Log.logPrint("关注状态正在更新, 跳过本次刷新");
++      return;
+     }
++    var targets =
++        followList.where((item) => force || _isStatusStale(item)).toList();
++    if (targets.isEmpty) {
++      updating.value = false;
++      filterData();
++      return;
++    }
++    updating.value = true;
++    Log.logPrint(
++        "开始更新关注状态, 总数: ${followList.length}, 待更新: ${targets.length}");
+ 
+-    // 交错处理
+-    var result = <FollowUser>[];
+-    while (grouped.values.any((queue) => queue.isNotEmpty)) {
+-      for (var queue in grouped.values) {
+-        if (queue.isNotEmpty) {
+-          result.add(queue.removeFirst());
++    var grouped = <String, List<FollowUser>>{};
++    for (var item in targets) {
++      grouped.putIfAbsent(item.siteId, () => <FollowUser>[]).add(item);
++    }
++
++    try {
++      await Future.wait(grouped.entries.map((entry) async {
++        var site = Sites.allSites[entry.key];
++        if (site == null) {
++          return;
+         }
++        if (_isSiteBlocked(entry.key)) {
++          return;
++        }
++        if (entry.key == Constant.kBiliBili) {
++          await _updateBiliBiliGroup(site, entry.value);
++          return;
++        }
++        await _runWithLimit(
++          entry.value,
++          _siteConcurrency(entry.key),
++          (item) => _refreshStatus(site, item),
++        );
++      }));
++    } catch (e) {
++      Log.logPrint("更新关注状态异常: $e");
++    } finally {
++      updating.value = false;
++      filterData();
++      Log.logPrint("关注状态更新完成");
++    }
++  }
++
++  Future<void> _runWithLimit<T>(
++    List<T> items,
++    int limit,
++    Future<void> Function(T item) task,
++  ) async {
++    if (items.isEmpty) {
++      return;
++    }
++    var queue = Queue<T>.from(items);
++    Future<void> worker() async {
++      while (queue.isNotEmpty) {
++        var item = queue.removeFirst();
++        await task(item);
+       }
+     }
+ 
+-    return result;
++    var workers = <Future<void>>[];
++    var count = min(limit, items.length);
++    for (var i = 0; i < count; i++) {
++      workers.add(worker());
++    }
++    await Future.wait(workers);
+   }
+ 
+-  void startUpdateStatus() async {
+-    updatedCount = 0;
+-    updating.value = true;
++  Future<void> _updateBiliBiliGroup(
++    Site site,
++    List<FollowUser> items,
++  ) async {
++    var liveSite = site.liveSite;
++    if (liveSite is! BiliBiliSite) {
++      await _runWithLimit(
++        items,
++        _siteConcurrency(site.id),
++        (item) => _refreshStatus(site, item),
++      );
++      return;
++    }
+ 
+-    var concurrency = getOptimalConcurrency();
++    var batchable = items
++        .where((item) => (item.anchorUid ?? "").isNotEmpty)
++        .toList();
++    var singles = items
++        .where((item) => (item.anchorUid ?? "").isEmpty)
++        .toList();
+ 
+-    Log.logPrint("开始更新关注状态，并发数: $concurrency，总数: ${followList.length}");
++    if (batchable.length >= 2) {
++      try {
++        var uids = batchable.map((item) => item.anchorUid!).toSet().toList();
++        var result = await _withRetry(
++          site.id,
++          () => liveSite.getLiveStatusInfoByUids(uids),
++        );
++        for (var item in batchable) {
++          var info = result[item.anchorUid];
++          if (info == null) {
++            singles.add(item);
++          } else {
++            _applyStatus(item, info);
++          }
++        }
++      } catch (e) {
++        Log.logPrint("B站批量状态查询失败, 回退单房间查询: $e");
++        singles.addAll(batchable);
++      }
++    } else {
++      singles.addAll(batchable);
++    }
+ 
+-    // 按平台交错排列，避免单一平台阻塞
+-    var interleavedList = interleaveByPlatform(followList);
++    if (singles.isNotEmpty) {
++      await _runWithLimit(
++        singles,
++        _siteConcurrency(site.id),
++        (item) => _refreshStatus(site, item),
++      );
++    }
++  }
+ 
+-    // 创建任务队列
+-    var taskQueue = Queue<FollowUser>.from(interleavedList);
++  Future<void> _refreshStatus(Site site, FollowUser item) async {
++    var pending = _inflight[item.id];
++    if (pending != null) {
++      await pending;
++      return;
++    }
++    var future = _queryStatus(site, item);
++    _inflight[item.id] = future;
++    try {
++      await future;
++    } finally {
++      if (identical(_inflight[item.id], future)) {
++        _inflight.remove(item.id);
++      }
++    }
++  }
++
++  Future<void> _queryStatus(Site site, FollowUser item) async {
++    try {
++      var info = await _withRetry(
++        site.id,
++        () => site.liveSite.getLiveStatusInfo(roomId: item.roomId),
++      );
++      _applyStatus(item, info);
++    } catch (e) {
++      Log.logPrint("更新关注状态失败: ${item.siteId}/${item.roomId} $e");
++      _restoreCachedStatus(item);
++    }
++  }
+ 
+-    // 工作函数 - 持续从队列中取任务执行
+-    Future<void> worker(int workerId) async {
+-      while (taskQueue.isNotEmpty) {
+-        var item = taskQueue.removeFirst();
+-        await updateLiveStatus(item);
++  Future<T> _withRetry<T>(String siteId, Future<T> Function() task) async {
++    Object? lastError;
++    for (var attempt = 0; attempt < 2; attempt++) {
++      var startedAt = DateTime.now();
++      try {
++        var result = await task().timeout(const Duration(seconds: 8));
++        _siteFailures.remove(siteId);
++        return result;
++      } catch (e) {
++        lastError = e;
++        var elapsed = DateTime.now().difference(startedAt);
++        // 耗时已经接近超时上限时不再重试, 避免把尾延迟翻倍.
++        if (elapsed.inSeconds >= 5) {
++          break;
++        }
++        if (attempt == 0) {
++          await Future.delayed(const Duration(milliseconds: 300));
++        }
+       }
+     }
+ 
+-    // 启动固定数量的并发 worker
+-    var workers = <Future>[];
+-    for (var i = 0; i < concurrency; i++) {
+-      workers.add(worker(i));
++    var failures = (_siteFailures[siteId] ?? 0) + 1;
++    _siteFailures[siteId] = failures;
++    if (failures >= 3) {
++      _siteBlockedUntil[siteId] =
++          DateTime.now().add(const Duration(seconds: 60));
++      _siteFailures.remove(siteId);
++      Log.logPrint("站点 $siteId 连续失败, 暂停 60 秒");
+     }
++    throw lastError ?? Exception("请求失败");
++  }
+ 
+-    await Future.wait(workers);
++  bool _isSiteBlocked(String siteId) {
++    var until = _siteBlockedUntil[siteId];
++    if (until == null) {
++      return false;
++    }
++    if (DateTime.now().isBefore(until)) {
++      return true;
++    }
++    _siteBlockedUntil.remove(siteId);
++    return false;
++  }
+ 
+-    Log.logPrint("关注状态更新完成");
++  void _applyStatus(FollowUser item, LiveStatusInfo info) {
++    var newStatus = info.isLive ? 2 : 1;
++    var newStartTime = info.isLive ? _validStartTime(info.startTime) : null;
++    var newAnchorUid = (info.anchorUid ?? "").isEmpty ? null : info.anchorUid;
++    var changed = item.lastLiveStatus != newStatus ||
++        item.lastLiveStartTime != newStartTime ||
++        (newAnchorUid != null && item.anchorUid != newAnchorUid);
++
++    item.liveStatus.value = newStatus;
++    item.liveStartTime = newStartTime;
++    item.lastLiveStatus = newStatus;
++    item.lastCheckedAt = DateTime.now().millisecondsSinceEpoch;
++    item.lastLiveStartTime = newStartTime;
++    if (newAnchorUid != null) {
++      item.anchorUid = newAnchorUid;
++    }
++    // 状态没有变化时不写数据库, 减少频繁轮询带来的写入压力.
++    if (changed) {
++      unawaited(DBService.instance.addFollow(item));
++    }
++    _scheduleFilter();
+   }
+ 
+-  Future updateLiveStatus(FollowUser item) async {
+-    try {
+-      var site = Sites.allSites[item.siteId]!;
+-      // 先只查状态
+-      var isLiving = await site.liveSite.getLiveStatus(roomId: item.roomId);
+-      item.liveStatus.value = isLiving ? 2 : 1;
+-      if (item.liveStatus.value == 2) {
+-        // 只有正在直播时才查详细信息
+-        var detail = await site.liveSite.getRoomDetail(roomId: item.roomId);
+-        item.liveStartTime = detail.showTime;
+-      } else {
+-        item.liveStartTime = null;
+-      }
+-    } catch (e) {
+-      Log.logPrint(e);
++  String? _validStartTime(String? value) {
++    if (value == null || value.isEmpty) {
++      return null;
++    }
++    var timestamp = int.tryParse(value);
++    if (timestamp == null || timestamp <= 0) {
++      return null;
++    }
++    var now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
++    if (timestamp > now + 60) {
++      return null;
++    }
++    return value;
++  }
++
++  void _restoreCachedStatus(FollowUser item) {
++    if (item.lastLiveStatus != null) {
++      item.liveStatus.value = item.lastLiveStatus!;
++      item.liveStartTime = item.lastLiveStartTime;
++    } else {
+       item.liveStatus.value = 0;
+       item.liveStartTime = null;
+-    } finally {
+-      updatedCount++;
+-      if (updatedCount >= followList.length) {
+-        filterData();
+-        updating.value = false;
+-      }
+     }
++    _scheduleFilter();
++  }
++
++  void _scheduleFilter() {
++    filterTimer?.cancel();
++    filterTimer = Timer(const Duration(milliseconds: 250), filterData);
+   }
+ 
+   void filterData() {
+-    followList.sort((a, b) => b.liveStatus.value.compareTo(a.liveStatus.value));
++    followList.sort((a, b) {
++      var byStatus = b.liveStatus.value.compareTo(a.liveStatus.value);
++      if (byStatus != 0) {
++        return byStatus;
++      }
++      return a.addTime.compareTo(b.addTime);
++    });
+     liveList.assignAll(followList.where((x) => x.liveStatus.value == 2));
+     notLiveList.assignAll(followList.where((x) => x.liveStatus.value == 1));
+     _updatedListController.add(0);
+@@ -438,7 +671,9 @@ class FollowService extends GetxService {
+ 
+   @override
+   void onClose() {
++    WidgetsBinding.instance.removeObserver(this);
+     updateTimer?.cancel();
++    filterTimer?.cancel();
+     subscription?.cancel();
+     super.onClose();
+   }
+diff --git a/simple_live_core/lib/simple_live_core.dart b/simple_live_core/lib/simple_live_core.dart
+index dd2dbc0..47d6619 100644
+--- a/simple_live_core/lib/simple_live_core.dart
++++ b/simple_live_core/lib/simple_live_core.dart
+@@ -18,6 +18,7 @@ export 'src/model/live_category.dart';
+ export 'src/model/live_play_quality.dart';
+ export 'src/model/live_room_detail.dart';
+ export 'src/model/live_room_item.dart';
++export 'src/model/live_status_info.dart';
+ export 'src/model/live_search_result.dart';
+ export 'src/model/live_anchor_item.dart';
+ export 'src/model/live_play_url.dart';
+diff --git a/simple_live_core/lib/src/bilibili_site.dart b/simple_live_core/lib/src/bilibili_site.dart
+index 0e7b381..f67c79d 100644
+--- a/simple_live_core/lib/src/bilibili_site.dart
++++ b/simple_live_core/lib/src/bilibili_site.dart
+@@ -13,6 +13,7 @@ import 'package:simple_live_core/src/model/live_play_url.dart';
+ import 'package:simple_live_core/src/model/live_room_item.dart';
+ import 'package:simple_live_core/src/model/live_search_result.dart';
+ import 'package:simple_live_core/src/model/live_room_detail.dart';
++import 'package:simple_live_core/src/model/live_status_info.dart';
+ import 'package:simple_live_core/src/model/live_play_quality.dart';
+ import 'package:simple_live_core/src/model/live_category_result.dart';
+ 
+@@ -36,6 +37,7 @@ class BiliBiliSite implements LiveSite {
+   String buvid3 = "";
+   String buvid4 = "";
+   String accessId = "";
++  Future<Map>? _buvidRequest;
+   Future<Map<String, String>> getHeader() async {
+     if (buvid3.isEmpty) {
+       var buvidInfo = await getBuvid();
+@@ -387,6 +389,12 @@ class BiliBiliSite implements LiveSite {
+ 
+   @override
+   Future<bool> getLiveStatus({required String roomId}) async {
++    var info = await getLiveStatusInfo(roomId: roomId);
++    return info.isLive;
++  }
++
++  @override
++  Future<LiveStatusInfo> getLiveStatusInfo({required String roomId}) async {
+     var result = await HttpClient.instance.getJson(
+       "https://api.live.bilibili.com/room/v1/Room/get_info",
+       queryParameters: {
+@@ -394,7 +402,103 @@ class BiliBiliSite implements LiveSite {
+       },
+       header: await getHeader(),
+     );
+-    return (asT<int?>(result["data"]["live_status"]) ?? 0) == 1;
++    var data = result["data"];
++    var isLive = (asT<int?>(data["live_status"]) ?? 0) == 1;
++    return LiveStatusInfo(
++      isLive: isLive,
++      startTime: isLive ? _parseLiveStartTime(data["live_time"]) : null,
++      online: asT<int?>(data["online"]),
++      anchorUid: data["uid"]?.toString(),
++    );
++  }
++
++  /// Query live status for multiple anchors in one request.
++  /// Key of the result is the anchor uid.
++  Future<Map<String, LiveStatusInfo>> getLiveStatusInfoByUids(
++    List<String> uids,
++  ) async {
++    if (uids.isEmpty) {
++      return {};
++    }
++    // The endpoint accepts at most 99 uids per request.
++    var statusMap = <String, LiveStatusInfo>{};
++    for (var start = 0; start < uids.length; start += 99) {
++      var end = start + 99 > uids.length ? uids.length : start + 99;
++      var chunk = uids.sublist(start, end);
++      statusMap.addAll(await _getLiveStatusInfoByUidsChunk(chunk));
++    }
++    return statusMap;
++  }
++
++  Future<Map<String, LiveStatusInfo>> _getLiveStatusInfoByUidsChunk(
++    List<String> uids,
++  ) async {
++    var result = await HttpClient.instance.getJson(
++      "https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids",
++      queryParameters: {
++        "uids[]": uids,
++      },
++      header: await getHeader(),
++    );
++    var data = result["data"];
++    Iterable items;
++    if (data is List) {
++      items = data;
++    } else if (data is Map) {
++      items = data.values;
++    } else {
++      return {};
++    }
++    var statusMap = <String, LiveStatusInfo>{};
++    for (var item in items) {
++      if (item is! Map) {
++        continue;
++      }
++      var uid = item["uid"]?.toString();
++      if (uid == null || uid.isEmpty) {
++        continue;
++      }
++      var isLive = (asT<int?>(item["live_status"]) ?? 0) == 1;
++      statusMap[uid] = LiveStatusInfo(
++        isLive: isLive,
++        startTime: isLive ? _parseLiveStartTime(item["live_time"]) : null,
++        online: asT<int?>(item["online"]),
++        anchorUid: uid,
++      );
++    }
++    return statusMap;
++  }
++
++  String? _parseLiveStartTime(dynamic value) {
++    if (value == null) {
++      return null;
++    }
++    if (value is int) {
++      return value > 0 ? value.toString() : null;
++    }
++    var text = value.toString().trim();
++    if (text.isEmpty || text == "0") {
++      return null;
++    }
++    var timestamp = int.tryParse(text);
++    if (timestamp != null) {
++      return timestamp > 0 ? timestamp.toString() : null;
++    }
++    var date = DateTime.tryParse(text.replaceFirst(" ", "T"));
++    if (date == null) {
++      return null;
++    }
++    // Bilibili returns Beijing time, convert the fields as UTC+8.
++    var utcMillis = DateTime.utc(
++      date.year,
++      date.month,
++      date.day,
++      date.hour,
++      date.minute,
++      date.second,
++    ).millisecondsSinceEpoch;
++    var seconds = utcMillis ~/ 1000 - 8 * 3600;
++    return seconds > 0 ? seconds.toString() : null;
+   }
+ 
+   @override
+@@ -436,15 +540,30 @@ class BiliBiliSite implements LiveSite {
+   ///   "b_4": "buvid4",
+   /// }
+   /// ```
+-  Future<Map> getBuvid() async {
+-    try {
+-      if (cookie.contains("buvid3")) {
+-        return {
+-          "b_3": RegExp(r"buvid3=(.*?);").firstMatch(cookie)?.group(1) ?? "",
+-          "b_4": RegExp(r"buvid4=(.*?);").firstMatch(cookie)?.group(1) ?? "",
+-        };
++  Future<Map> getBuvid() {
++    if (cookie.contains("buvid3")) {
++      return Future.value({
++        "b_3": RegExp(r"buvid3=(.*?);").firstMatch(cookie)?.group(1) ?? "",
++        "b_4": RegExp(r"buvid4=(.*?);").firstMatch(cookie)?.group(1) ?? "",
++      });
++    }
++
++    var pending = _buvidRequest;
++    if (pending != null) {
++      return pending;
++    }
++
++    var request = _fetchBuvid();
++    _buvidRequest = request;
++    return request.whenComplete(() {
++      if (identical(_buvidRequest, request)) {
++        _buvidRequest = null;
+       }
++    });
++  }
+ 
++  Future<Map> _fetchBuvid() async {
++    try {
+       var result = await HttpClient.instance.getJson(
+         "https://api.bilibili.com/x/frontend/finger/spi",
+         queryParameters: {},
+@@ -453,6 +572,7 @@ class BiliBiliSite implements LiveSite {
+           "referer": kDefaultReferer,
+           "cookie": cookie,
+         },
++        timeout: const Duration(seconds: 5),
+       );
+       return result["data"];
+     } catch (e) {
+diff --git a/simple_live_core/lib/src/common/http_client.dart b/simple_live_core/lib/src/common/http_client.dart
+index 1fd7b92..2cf15d2 100644
+--- a/simple_live_core/lib/src/common/http_client.dart
++++ b/simple_live_core/lib/src/common/http_client.dart
+@@ -1,5 +1,7 @@
+-import 'package:simple_live_core/src/common/core_error.dart';
++import 'dart:async';
++
+ import 'package:dio/dio.dart';
++import 'package:simple_live_core/src/common/core_error.dart';
+ 
+ import 'custom_interceptor.dart';
+ 
+@@ -27,16 +29,18 @@ class HttpClient {
+   /// * [url] 请求链接
+   /// * [queryParameters] 请求参数
+   /// * [cancel] 任务取消Token
++  /// * [timeout] 覆盖默认超时时间
+   Future<String> getText(
+     String url, {
+     Map<String, dynamic>? queryParameters,
+     Map<String, dynamic>? header,
+     CancelToken? cancel,
++    Duration? timeout,
+   }) async {
+     try {
+       queryParameters ??= {};
+       header ??= {};
+-      var result = await dio.get(
++      var request = dio.get(
+         url,
+         queryParameters: queryParameters,
+         options: Options(
+@@ -45,7 +49,11 @@ class HttpClient {
+         ),
+         cancelToken: cancel,
+       );
++      var result =
++          timeout == null ? await request : await request.timeout(timeout);
+       return result.data;
++    } on TimeoutException {
++      throw CoreError("请求超时");
+     } catch (e) {
+       if (e is DioException && e.type == DioExceptionType.badResponse) {
+         throw CoreError(e.message ?? "",
+@@ -60,16 +68,18 @@ class HttpClient {
+   /// * [url] 请求链接
+   /// * [queryParameters] 请求参数
+   /// * [cancel] 任务取消Token
++  /// * [timeout] 覆盖默认超时时间
+   Future<dynamic> getJson(
+     String url, {
+     Map<String, dynamic>? queryParameters,
+     Map<String, dynamic>? header,
+     CancelToken? cancel,
++    Duration? timeout,
+   }) async {
+     try {
+       queryParameters ??= {};
+       header ??= {};
+-      var result = await dio.get(
++      var request = dio.get(
+         url,
+         queryParameters: queryParameters,
+         options: Options(
+@@ -78,7 +88,11 @@ class HttpClient {
+         ),
+         cancelToken: cancel,
+       );
++      var result =
++          timeout == null ? await request : await request.timeout(timeout);
+       return result.data;
++    } on TimeoutException {
++      throw CoreError("请求超时");
+     } catch (e) {
+       if (e is DioException && e.type == DioExceptionType.badResponse) {
+         throw CoreError(e.message ?? "",
+diff --git a/simple_live_core/lib/src/douyin_site.dart b/simple_live_core/lib/src/douyin_site.dart
+index 9c1fc82..72b3ad0 100644
+--- a/simple_live_core/lib/src/douyin_site.dart
++++ b/simple_live_core/lib/src/douyin_site.dart
+@@ -748,8 +748,18 @@ class DouyinSite implements LiveSite {
+ 
+   @override
+   Future<bool> getLiveStatus({required String roomId}) async {
++    var info = await getLiveStatusInfo(roomId: roomId);
++    return info.isLive;
++  }
++
++  @override
++  Future<LiveStatusInfo> getLiveStatusInfo({required String roomId}) async {
+     var result = await getRoomDetail(roomId: roomId);
+-    return result.status;
++    return LiveStatusInfo(
++      isLive: result.status,
++      startTime: result.showTime,
++      online: result.online,
++    );
+   }
+ 
+   @override
+diff --git a/simple_live_core/lib/src/douyu_site.dart b/simple_live_core/lib/src/douyu_site.dart
+index 5ed6c6b..72f7b04 100644
+--- a/simple_live_core/lib/src/douyu_site.dart
++++ b/simple_live_core/lib/src/douyu_site.dart
+@@ -13,6 +13,7 @@ import 'package:simple_live_core/src/model/live_play_url.dart';
+ import 'package:simple_live_core/src/model/live_room_item.dart';
+ import 'package:simple_live_core/src/model/live_search_result.dart';
+ import 'package:simple_live_core/src/model/live_room_detail.dart';
++import 'package:simple_live_core/src/model/live_status_info.dart';
+ import 'package:simple_live_core/src/model/live_play_quality.dart';
+ import 'package:simple_live_core/src/model/live_category_result.dart';
+ import 'package:html_unescape/html_unescape.dart';
+@@ -362,8 +363,30 @@ class DouyuSite implements LiveSite {
+ 
+   @override
+   Future<bool> getLiveStatus({required String roomId}) async {
++    var info = await getLiveStatusInfo(roomId: roomId);
++    return info.isLive;
++  }
++
++  @override
++  Future<LiveStatusInfo> getLiveStatusInfo({required String roomId}) async {
+     var roomInfo = await _getRoomInfo(roomId);
+-    return roomInfo["show_status"] == 1 && roomInfo["videoLoop"] != 1;
++    var isLive = roomInfo["show_status"] == 1 && roomInfo["videoLoop"] != 1;
++    var showTime = roomInfo["show_time"]?.toString();
++    var biz = roomInfo["room_biz_all"];
++    var hot = biz is Map ? biz["hot"] : roomInfo["hot"];
++    return LiveStatusInfo(
++      isLive: isLive,
++      startTime: isLive && _isPositiveTimestamp(showTime) ? showTime : null,
++      online: int.tryParse(hot?.toString() ?? ""),
++    );
++  }
++
++  bool _isPositiveTimestamp(String? value) {
++    if (value == null || value.isEmpty) {
++      return false;
++    }
++    var timestamp = int.tryParse(value);
++    return timestamp != null && timestamp > 0;
+   }
+ 
+   int parseHotNum(String hn) {
+diff --git a/simple_live_core/lib/src/huya_site.dart b/simple_live_core/lib/src/huya_site.dart
+index dc9e6b8..277638e 100644
+--- a/simple_live_core/lib/src/huya_site.dart
++++ b/simple_live_core/lib/src/huya_site.dart
+@@ -9,6 +9,7 @@ import 'package:simple_live_core/src/model/tars/get_cdn_token_ex_resp.dart';
+ import 'package:simple_live_core/src/model/tars/get_cdn_token_req.dart';
+ import 'package:simple_live_core/src/model/tars/get_cdn_token_resp.dart';
+ import 'package:simple_live_core/src/model/tars/huya_user_id.dart';
++import 'package:simple_live_core/src/model/live_status_info.dart';
+ import 'package:tars_dart/tars/net/base_tars_http.dart';
+ 
+ class HuyaSite implements LiveSite {
+@@ -523,8 +524,83 @@ class HuyaSite implements LiveSite {
+ 
+   @override
+   Future<bool> getLiveStatus({required String roomId}) async {
+-    var roomInfo = await _getRoomInfo(roomId);
+-    return roomInfo["roomInfo"]["eLiveStatus"] == 2;
++    var info = await getLiveStatusInfo(roomId: roomId);
++    return info.isLive;
++  }
++
++  @override
++  Future<LiveStatusInfo> getLiveStatusInfo({required String roomId}) async {
++    try {
++      var result = await HttpClient.instance.getJson(
++        "https://mp.huya.com/cache.php",
++        queryParameters: {
++          "m": "Live",
++          "do": "profileRoom",
++          "pid": roomId,
++          "roomid": roomId,
++        },
++        header: {
++          "user-agent": kUserAgent,
++        },
++        timeout: const Duration(seconds: 5),
++      );
++      var body = result is String ? json.decode(result) : result;
++      if (body is! Map || body["status"] != 200) {
++        throw Exception("虎牙状态接口返回异常");
++      }
++      var data = body["data"];
++      if (data is! Map) {
++        // 接口返回空数据说明房间不存在, 按未开播处理.
++        return LiveStatusInfo(isLive: false);
++      }
++      var isLive = _parseHuyaLiveStatus(
++        data["liveStatus"] ?? data["realLiveStatus"],
++      );
++      if (isLive == null) {
++        throw Exception("虎牙状态字段缺失");
++      }
++      var startTime = data["startTime"]?.toString();
++      var liveData = data["liveData"];
++      var online = data["totalCount"] ??
++          (liveData is Map ? liveData["totalCount"] : null);
++      return LiveStatusInfo(
++        isLive: isLive,
++        startTime: isLive && _isPositiveTimestamp(startTime) ? startTime : null,
++        online: int.tryParse(online?.toString() ?? ""),
++      );
++    } catch (e) {
++      var roomInfo = await _getRoomInfo(roomId);
++      return LiveStatusInfo(
++        isLive: roomInfo["roomInfo"]["eLiveStatus"] == 2,
++      );
++    }
++  }
++
++  bool? _parseHuyaLiveStatus(dynamic value) {
++    if (value is bool) {
++      return value;
++    }
++    if (value is num) {
++      return value == 1 || value == 2;
++    }
++    if (value is String) {
++      var text = value.trim().toUpperCase();
++      if (text == "ON") {
++        return true;
++      }
++      if (text == "OFF") {
++        return false;
++      }
++    }
++    return null;
++  }
++
++  bool _isPositiveTimestamp(String? value) {
++    if (value == null || value.isEmpty) {
++      return false;
++    }
++    var timestamp = int.tryParse(value);
++    return timestamp != null && timestamp > 0;
+   }
+ 
+   /// 匿名登录获取uid
+diff --git a/simple_live_core/lib/src/interface/live_site.dart b/simple_live_core/lib/src/interface/live_site.dart
+index 340b4a0..b5770b9 100644
+--- a/simple_live_core/lib/src/interface/live_site.dart
++++ b/simple_live_core/lib/src/interface/live_site.dart
+@@ -6,6 +6,7 @@ import '../model/live_message.dart';
+ import '../model/live_play_url.dart';
+ import '../model/live_room_detail.dart';
+ import '../model/live_search_result.dart';
++import '../model/live_status_info.dart';
+ 
+ import '../model/live_category.dart';
+ import '../model/live_play_quality.dart';
+@@ -82,6 +83,11 @@ class LiveSite {
+     return Future.value(false);
+   }
+ 
++  /// 查询直播状态, 返回开播时间等轻量信息
++  Future<LiveStatusInfo> getLiveStatusInfo({required String roomId}) async {
++    return LiveStatusInfo(isLive: await getLiveStatus(roomId: roomId));
++  }
++
+   /// 读取指定房间的SC
+   Future<List<LiveSuperChatMessage>> getSuperChatMessage(
+       {required String roomId}) {
+diff --git a/simple_live_core/lib/src/model/live_status_info.dart b/simple_live_core/lib/src/model/live_status_info.dart
+new file mode 100644
+index 0000000..7260ba1
+--- /dev/null
++++ b/simple_live_core/lib/src/model/live_status_info.dart
+@@ -0,0 +1,21 @@
++/// Lightweight live room status returned by status-only queries.
++class LiveStatusInfo {
++  const LiveStatusInfo({
++    required this.isLive,
++    this.startTime,
++    this.online,
++    this.anchorUid,
++  });
++
++  /// Whether the room is broadcasting right now.
++  final bool isLive;
++
++  /// Live start time in seconds since epoch, as a string.
++  final String? startTime;
++
++  /// Popularity value when the platform reports one.
++  final int? online;
++
++  /// Anchor uid when the platform exposes it, used for batch queries.
++  final String? anchorUid;
++}
+diff --git a/simple_live_core/lib/src/scripts/douyin_sign.dart b/simple_live_core/lib/src/scripts/douyin_sign.dart
+index 0c4aa51..39927cc 100644
+--- a/simple_live_core/lib/src/scripts/douyin_sign.dart
++++ b/simple_live_core/lib/src/scripts/douyin_sign.dart
+@@ -10648,22 +10648,58 @@ function getMSSDKSignature(msStub, userAgent) {
+ ''';
+ 
+   static const String defaultUserAgent = DouyinSite.kDefaultUserAgent;
+-  static String getAbogusUrl(String url, String userAgent) {
+-    JsRuntime flutterJs = JsRuntime(
+-      memoryLimit: 4 * 1024 * 1024,
++
++  static JsRuntime? _abogusRuntime;
++  static int _abogusUseCount = 0;
++
++  static JsRuntime _acquireAbogusRuntime() {
++    var runtime = _abogusRuntime;
++    if (runtime != null) {
++      return runtime;
++    }
++    var created = JsRuntime(
++      memoryLimit: 8 * 1024 * 1024,
+       maxStackSize: 64 * 1024,
+     );
++    created.eval(kABogus);
++    _abogusRuntime = created;
++    return created;
++  }
++
++  static void _releaseAbogusRuntime() {
++    var runtime = _abogusRuntime;
++    _abogusRuntime = null;
++    _abogusUseCount = 0;
++    if (runtime != null) {
++      try {
++        runtime.dispose();
++      } catch (_) {
++        // Ignore dispose errors, a new runtime will be created on demand.
++      }
++    }
++  }
++
++  static String getAbogusUrl(String url, String userAgent) {
+     final msToken = generateMsToken(107);
+     var params = ('$url&msToken=$msToken').split('?')[1];
+     var query = params.contains("?") ? params.split("?")[1] : params;
+-    var jsCode = kABogus;
+-    flutterJs.eval(jsCode);
+-    // 执行getABogus函数
+-    var aBogus = flutterJs.eval("getABogus('$query', '$userAgent')");
+-    flutterJs.dispose();
+-    var newUrl =
+-        '$url&msToken=${Uri.encodeComponent(msToken)}&a_bogus=${Uri.encodeComponent(aBogus)}';
+-    return newUrl;
++    Object? lastError;
++    for (var attempt = 0; attempt < 2; attempt++) {
++      try {
++        var runtime = _acquireAbogusRuntime();
++        // 执行getABogus函数
++        var aBogus = runtime.eval("getABogus('$query', '$userAgent')");
++        _abogusUseCount++;
++        if (_abogusUseCount >= 500) {
++          _releaseAbogusRuntime();
++        }
++        return '$url&msToken=${Uri.encodeComponent(msToken)}&a_bogus=${Uri.encodeComponent(aBogus)}';
++      } catch (e) {
++        lastError = e;
++        _releaseAbogusRuntime();
++      }
++    }
++    throw Exception("抖音签名失败: $lastError");
+   }
+ 
+   static String getSignature(String roomId, String uniqueId) {
